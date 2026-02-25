@@ -1,0 +1,65 @@
+{
+  "1438203049838510249": {
+    "questChannelId": "1473526172775092397",
+    "eventCategoryId": "1473517582744158321",
+    "quests": {
+      "quest_1": {
+        "label": "Quest 1 - Killstreak Challenge",
+        "queue": [
+          "433928036232986624"
+        ],
+        "messageId": "1473748553296908358",
+        "shuffleCounts": {},
+        "captains": {
+          "team1": null,
+          "team2": null
+        }
+      }
+    },
+    "channels": {
+      "1473526172775092397": {
+        "quest": {
+          "key": "quest_3",
+          "label": "Quest 3 - Highest KDR",
+          "rules": "Finish with the highest K/D ratio."
+        },
+        "settings": {
+          "players": 4,
+          "duration": 5,
+          "objective": "Most Kills"
+        },
+        "queue": [],
+        "shuffleCounts": {},
+        "captains": {
+          "team1": null,
+          "team2": null
+        },
+        "queueMessageId": "1473756285781413888",
+        "queueOpen": false,
+        "lastGame": {
+          "startedAt": 1771442373025,
+          "players": [
+            "433928036232986624",
+            "733320463035662346",
+            "1395399019743936532",
+            "1261059668445233154"
+          ],
+          "quest": {
+            "key": "quest_1",
+            "label": "Quest 1 - Killstreak Challenge",
+            "rules": "Get the highest killstreak in the event window."
+          },
+          "settings": {
+            "players": 4,
+            "duration": 5,
+            "objective": "10 ks"
+          }
+        }
+      }
+    }
+  },
+  "1229480488461271095": {
+    "eventCategoryId": null,
+    "channels": {}
+  }
+}
