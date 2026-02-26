@@ -16,10 +16,10 @@ function fmtKdr(kills, deaths) {
 async function importDeathmatchModule() {
   // Try both casings so this doesn’t randomly die on Linux vs Windows.
   try {
-    return await import("../gamemodes/deathMatch.js");
+    return await import("../gamemodes/deathmatch.js");
   } catch {}
   try {
-    return await import("../gamemodes/deathMatch.js");
+    return await import("../gamemodes/deathmatch.js");
   } catch {}
   return null;
 }

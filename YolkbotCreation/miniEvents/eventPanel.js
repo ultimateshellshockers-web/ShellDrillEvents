@@ -14,6 +14,7 @@ import {
   StringSelectMenuBuilder,
 } from "discord.js";
 import { query } from "../src/db.js";
+import { requireStaffCommand, canRunStaffCommand } from "../staffcommands/botcommands.js";
 
 // --------------------
 // postgres storage
@@ -151,17 +152,27 @@ const ALLOWED_REGIONS = new Set(["uscentral", "germany"]);
 const ALLOWED_MAPS = new Set(["castle", "blue", "growler", "cluckgrounds"]);
 
 // --------------------
-// permissions
+// permissions (centralized, adminpanel is parent)
 // --------------------
-function isStaff(member) {
-  const perms = member?.permissions;
-  if (!perms) return false;
-  return perms.has(PermissionsBitField.Flags.Administrator) || perms.has(PermissionsBitField.Flags.ManageGuild);
+const STAFF_EVENT_CMD = "eventpanel";
+const STAFF_CONTROL_CMD = "controlevent";
+
+function canUseEventPanel(member) {
+  return canRunStaffCommand(member, STAFF_EVENT_CMD);
+}
+
+function canUseControlPanel(member) {
+  // allow explicit controlevent OR eventpanel permission
+  return canRunStaffCommand(member, STAFF_CONTROL_CMD) || canRunStaffCommand(member, STAFF_EVENT_CMD);
 }
 
 function canSpawnLivePanel(member) {
+  // allow staff (via adminpanel parent) OR people with mod perms to spawn the live message
+  if (canUseEventPanel(member)) return true;
+
   const perms = member?.permissions;
   if (!perms) return false;
+
   return (
     perms.has(PermissionsBitField.Flags.Administrator) ||
     perms.has(PermissionsBitField.Flags.ManageGuild) ||
@@ -198,12 +209,12 @@ async function tryGetKillstreakSnapshot(gameId, { limit = 10 } = {}) {
 }
 
 async function importDeathmatchModule() {
-  // be tolerant of casing differences across environments
+  // tolerant of casing differences across environments
   try {
-    return await import("../gamemodes/deathMatch.js");
+    return await import("../gamemodes/deathmatch.js");
   } catch {}
   try {
-    return await import("../gamemodes/deathMatch.js");
+    return await import("../gamemodes/deathmatch.js");
   } catch {}
   return null;
 }
@@ -459,13 +470,7 @@ async function tryKickPlayerForEvent(publicState, playerName) {
   {
     const attempt = await tryCallNamed(
       mod,
-      [
-        "kickKillstreakPlayer",
-        "kickDeathmatchPlayer",
-        "kickPlayer",
-        "bootPlayer",
-        "removePlayer",
-      ],
+      ["kickKillstreakPlayer", "kickDeathmatchPlayer", "kickPlayer", "bootPlayer", "removePlayer"],
       { gameId, playerName: player, name: player, player }
     );
     if (attempt.ok) return attempt;
@@ -510,13 +515,7 @@ async function tryResetEventRuntime(publicState) {
   {
     const attempt = await tryCallNamed(
       mod,
-      [
-        "resetKillstreakGame",
-        "resetDeathmatchGame",
-        "resetGame",
-        "restartGame",
-        "resetMatch",
-      ],
+      ["resetKillstreakGame", "resetDeathmatchGame", "resetGame", "restartGame", "resetMatch"],
       { gameId }
     );
     if (attempt.ok) return attempt;
@@ -553,20 +552,20 @@ function nowIso() {
 }
 
 function fmtTime(seconds) {
-  const s = Number(seconds);
-  if (!Number.isFinite(s) || s <= 0) return null;
-  const m = Math.floor(s / 60);
-  const r = s % 60;
+  const s0 = Number(seconds);
+  if (!Number.isFinite(s0) || s0 <= 0) return null;
+  const m = Math.floor(s0 / 60);
+  const r = s0 % 60;
   if (m <= 0) return `${r}s`;
   if (r === 0) return `${m}m`;
   return `${m}m ${r}s`;
 }
 
 function fmtClock(seconds) {
-  const s = Number(seconds);
-  if (!Number.isFinite(s) || s < 0) return null;
-  const m = Math.floor(s / 60);
-  const r = s % 60;
+  const s0 = Number(seconds);
+  if (!Number.isFinite(s0) || s0 < 0) return null;
+  const m = Math.floor(s0 / 60);
+  const r = s0 % 60;
   return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
 }
 
@@ -899,7 +898,7 @@ const MINI_EVENTS = {
   killstreak: {
     key: "killstreak",
     label: "Killstreak",
-    baseHowToWin: (s) => `Reach ${s?.targetNumber ?? "X"} kills in a row (no deaths) to win.`,
+    baseHowToWin: (s0) => `Reach ${s0?.targetNumber ?? "X"} kills in a row (no deaths) to win.`,
     baseRules: ["Any guns allowed unless staff restricts it.", "Staff may add weapon limits, maps, or other restrictions."],
     defaults: { targetNumber: 10, timeLimitSeconds: null },
     canAutoCreate: true,
@@ -908,9 +907,9 @@ const MINI_EVENTS = {
   deathmatch: {
     key: "deathmatch",
     label: "Deathmatch",
-    baseHowToWin: (s) => {
-      const t = s?.targetNumber ?? "X";
-      const timeStr = fmtTime(s?.timeLimitSeconds);
+    baseHowToWin: (s0) => {
+      const t = s0?.targetNumber ?? "X";
+      const timeStr = fmtTime(s0?.timeLimitSeconds);
       return `First to ${t} kills wins. If time runs out${timeStr ? ` (${timeStr})` : ""}, the player with the most kills wins.`;
     },
     baseRules: ["Any guns allowed unless staff restricts it."],
@@ -1060,8 +1059,8 @@ function getRemindersText() {
   ].join("\n");
 }
 
-function isValidHttpUrlMaybeEmpty(s) {
-  const t = String(s ?? "").trim();
+function isValidHttpUrlMaybeEmpty(s0) {
+  const t = String(s0 ?? "").trim();
   if (!t) return true;
   return /^https?:\/\//i.test(t);
 }
@@ -1071,14 +1070,7 @@ function isValidHttpUrlMaybeEmpty(s) {
 // --------------------
 async function autoCreateGameForEvent(
   eventKey,
-  {
-    region = DEFAULT_REGION,
-    map = DEFAULT_MAP,
-    targetNumber = null,
-    timeLimitSeconds = null,
-    forceNew = false,
-    remake = false,
-  } = {}
+  { region = DEFAULT_REGION, map = DEFAULT_MAP, targetNumber = null, timeLimitSeconds = null, forceNew = false, remake = false } = {}
 ) {
   if (!eventKey) throw new Error("No event selected.");
 
@@ -1273,10 +1265,10 @@ async function wireWinDetectionForRunningEvent(client, { guildId, publicState, a
     }
 
     const mod = await import("../gamemodes/killStreaks.js");
-    const cfg = mod?.configureKillstreakWin;
+    const cfg0 = mod?.configureKillstreakWin;
 
-    if (typeof cfg === "function") {
-      cfg({
+    if (typeof cfg0 === "function") {
+      cfg0({
         gameId,
         target,
         onWin: async ({ winnerName, target, final }) => {
@@ -1293,10 +1285,10 @@ async function wireWinDetectionForRunningEvent(client, { guildId, publicState, a
     const timeLimitSeconds = Number(publicState.settings.timeLimitSeconds) || 600;
 
     const mod = await importDeathmatchModule();
-    const cfg = mod?.configureDeathmatchWin;
+    const cfg0 = mod?.configureDeathmatchWin;
 
-    if (typeof cfg === "function") {
-      cfg({
+    if (typeof cfg0 === "function") {
+      cfg0({
         gameId,
         target,
         timeLimitSeconds,
@@ -1434,9 +1426,7 @@ function buildComponents(state) {
     const canShowLive = (state.selectedEventKey === "killstreak" || state.selectedEventKey === "deathmatch") && hasGameId;
 
     if (canShowLive) {
-      row.addComponents(
-        new ButtonBuilder().setCustomId("evp:livestats").setLabel("Live Stats").setStyle(ButtonStyle.Secondary)
-      );
+      row.addComponents(new ButtonBuilder().setCustomId("evp:livestats").setLabel("Live Stats").setStyle(ButtonStyle.Secondary));
 
       if (state.selectedEventKey === "deathmatch") {
         row.addComponents(
@@ -1556,8 +1546,8 @@ function buildEditModal(state) {
   return modal;
 }
 
-function parseOptionalInt(s, { min = 1, max = 999999 } = {}) {
-  const t = String(s ?? "").trim();
+function parseOptionalInt(s0, { min = 1, max = 999999 } = {}) {
+  const t = String(s0 ?? "").trim();
   if (!t) return null;
   const n = Number.parseInt(t, 10);
   if (!Number.isFinite(n)) return null;
@@ -1650,8 +1640,7 @@ function buildControlEmbed({ bundle, runtime, controlState }) {
   const lobbyLabel =
     runtime && typeof runtime.lobbyLocked === "boolean" ? (runtime.lobbyLocked ? "Locked" : "Unlocked") : "Unknown";
 
-  const targetText =
-    pub.settings.targetNumber != null ? String(pub.settings.targetNumber) : "—";
+  const targetText = pub.settings.targetNumber != null ? String(pub.settings.targetNumber) : "—";
   const timeLimitText =
     pub.settings.timeLimitSeconds != null ? fmtTime(pub.settings.timeLimitSeconds) || `${pub.settings.timeLimitSeconds}s` : "—";
   const playersText = String(runtime?.playerCount ?? 0);
@@ -1810,6 +1799,9 @@ async function sendControlPanelMessage(client, message) {
   return sent;
 }
 
+// --------------------
+// remake/reset helpers (unchanged)
+// --------------------
 async function remakeRunningEvent(client, publicState, { region, map, actorUserId = null }) {
   if (!publicState) throw new Error("No active event.");
   const evKey = s(publicState.selectedEventKey);
@@ -1896,7 +1888,6 @@ async function resetRunningEvent(client, publicState, actorUserId = null) {
   publicState.settings.controlLobbyLocked = null;
 
   if (evKey === "deathmatch") {
-    // re-enable Start Game on public panel
     publicState.startedAt = null;
     publicState.startedBy = null;
   } else {
@@ -1950,15 +1941,16 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
       const content = String(message.content ?? "");
       if (!content.startsWith(prefix)) return;
 
-      const [cmd] = content.slice(prefix.length).trim().split(/\s+/);
+      const cmd = String(content.slice(prefix.length).trim().split(/\s+/)[0] || "").toLowerCase();
       if (!cmd) return;
 
-      if (cmd === "eventpanel") {
-        if (!isStaff(message.member)) {
-          await message.reply("Staff only.").catch(() => null);
-          return;
-        }
+      if (cmd !== "eventpanel" && cmd !== "controlevent") return;
 
+      // Central gate (adminpanel parent should grant this once botcommands.js has the parent line)
+      const ok = await requireStaffCommand(message, prefix, cmd);
+      if (!ok) return;
+
+      if (cmd === "eventpanel") {
         let targetChannel = message.channel;
         const configuredId = await getPanelChannelId(message.guild.id, "eventpanel");
         if (configuredId) {
@@ -1988,11 +1980,6 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
       }
 
       if (cmd === "controlevent") {
-        if (!isStaff(message.member)) {
-          await message.reply("Staff only.").catch(() => null);
-          return;
-        }
-
         const sent = await sendControlPanelMessage(client, message);
         if (!sent) {
           await message.reply("Couldn't create the control panel.").catch(() => null);
@@ -2010,7 +1997,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
       // CONTROL PANEL SELECT MENUS
       // --------------------
       if (interaction.isStringSelectMenu() && interaction.customId?.startsWith("evc:")) {
-        if (!interaction.inGuild?.() || !isStaff(interaction.member)) {
+        if (!interaction.inGuild?.() || !canUseControlPanel(interaction.member)) {
           await interaction.reply({ content: "Staff-only controls.", ephemeral: true }).catch(() => null);
           return;
         }
@@ -2067,17 +2054,17 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
         const state = msgId ? await getStateByMessageId(msgId) : null;
 
         if (!state) {
-          await interaction.reply({ content: "Panel state missing. Repost with -eventpanel.", ephemeral: true });
+          await interaction.reply({ content: "Panel state missing. Repost with -eventpanel.", ephemeral: true }).catch(() => null);
           return;
         }
 
-        if (!interaction.inGuild?.() || !isStaff(interaction.member)) {
-          await interaction.reply({ content: "Staff-only controls.", ephemeral: true });
+        if (!interaction.inGuild?.() || !canUseEventPanel(interaction.member)) {
+          await interaction.reply({ content: "Staff-only controls.", ephemeral: true }).catch(() => null);
           return;
         }
 
         if (state.panelType !== "staff" || state.status !== "setup") {
-          await interaction.reply({ content: "This panel can’t be edited right now.", ephemeral: true });
+          await interaction.reply({ content: "This panel can’t be edited right now.", ephemeral: true }).catch(() => null);
           return;
         }
 
@@ -2085,7 +2072,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
 
         if (customId === "evp:map") {
           if (!ALLOWED_MAPS.has(chosen)) {
-            await interaction.reply({ content: "Invalid map.", ephemeral: true });
+            await interaction.reply({ content: "Invalid map.", ephemeral: true }).catch(() => null);
             return;
           }
           state.settings.map = chosen;
@@ -2093,7 +2080,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
 
         if (customId === "evp:region") {
           if (!ALLOWED_REGIONS.has(chosen)) {
-            await interaction.reply({ content: "Invalid server.", ephemeral: true });
+            await interaction.reply({ content: "Invalid server.", ephemeral: true }).catch(() => null);
             return;
           }
           state.settings.region = chosen;
@@ -2115,7 +2102,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
 
         // CONTROL PANEL BUTTONS
         if (customId?.startsWith("evc:")) {
-          if (!interaction.inGuild?.() || !isStaff(interaction.member)) {
+          if (!interaction.inGuild?.() || !canUseControlPanel(interaction.member)) {
             await interaction.reply({ content: "Staff-only controls.", ephemeral: true }).catch(() => null);
             return;
           }
@@ -2224,9 +2211,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
           }
 
           if (customId === "evc:kick") {
-            const modal = new ModalBuilder()
-              .setCustomId(`evc:modal:kick:${cp.messageId}`)
-              .setTitle("Kick or Boot Player");
+            const modal = new ModalBuilder().setCustomId(`evc:modal:kick:${cp.messageId}`).setTitle("Kick or Boot Player");
 
             const nameInput = new TextInputBuilder()
               .setCustomId("playerName")
@@ -2241,9 +2226,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
           }
 
           if (customId === "evc:chat") {
-            const modal = new ModalBuilder()
-              .setCustomId(`evc:modal:chat:${cp.messageId}`)
-              .setTitle("Send In-Game Message");
+            const modal = new ModalBuilder().setCustomId(`evc:modal:chat:${cp.messageId}`).setTitle("Send In-Game Message");
 
             const msgInput = new TextInputBuilder()
               .setCustomId("chatMessage")
@@ -2310,40 +2293,40 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
         const state = msgId ? await getStateByMessageId(msgId) : null;
 
         if (!state) {
-          await interaction.reply({ content: "Panel state missing. Repost with -eventpanel.", ephemeral: true });
+          await interaction.reply({ content: "Panel state missing. Repost with -eventpanel.", ephemeral: true }).catch(() => null);
           return;
         }
 
         // JOIN (public panel)
         if (customId === "evp:join") {
           if (state.status !== "running" || state.panelType !== "public") {
-            await interaction.reply({ content: "This panel is not accepting joins.", ephemeral: true });
+            await interaction.reply({ content: "This panel is not accepting joins.", ephemeral: true }).catch(() => null);
             return;
           }
           if (!state.settings.gameLink?.trim()) {
-            await interaction.reply({ content: "No link is set for this event yet.", ephemeral: true });
+            await interaction.reply({ content: "No link is set for this event yet.", ephemeral: true }).catch(() => null);
             return;
           }
-          await interaction.reply({ content: state.settings.gameLink.trim(), ephemeral: true });
+          await interaction.reply({ content: state.settings.gameLink.trim(), ephemeral: true }).catch(() => null);
           return;
         }
 
         // LIVE STATS (public killstreak + deathmatch)
         if (customId === "evp:livestats") {
           if (state.status !== "running" || state.panelType !== "public") {
-            await interaction.reply({ content: "Live stats are only available on the announcement panel.", ephemeral: true });
+            await interaction.reply({ content: "Live stats are only available on the announcement panel.", ephemeral: true }).catch(() => null);
             return;
           }
 
           const evKey = String(state.selectedEventKey ?? "").trim();
           if (evKey !== "killstreak" && evKey !== "deathmatch") {
-            await interaction.reply({ content: "Live stats aren’t supported for this event yet.", ephemeral: true });
+            await interaction.reply({ content: "Live stats aren’t supported for this event yet.", ephemeral: true }).catch(() => null);
             return;
           }
 
           const gameId = String(state.settings.gameId ?? "").trim();
           if (!gameId) {
-            await interaction.reply({ content: "No gameId is set for this event yet.", ephemeral: true });
+            await interaction.reply({ content: "No gameId is set for this event yet.", ephemeral: true }).catch(() => null);
             return;
           }
 
@@ -2368,35 +2351,35 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
           return;
         }
 
-        // staff-only controls
-        if (!interaction.inGuild?.() || !isStaff(interaction.member)) {
-          await interaction.reply({ content: "Staff-only controls.", ephemeral: true });
+        // staff-only controls (for staff/public startgame + all staff panel edits)
+        if (!interaction.inGuild?.() || !canUseEventPanel(interaction.member)) {
+          await interaction.reply({ content: "Staff-only controls.", ephemeral: true }).catch(() => null);
           return;
         }
 
         // START GAME (public deathmatch panel, staff only)
         if (customId === "evp:startgame") {
           if (state.status !== "running" || state.panelType !== "public" || state.selectedEventKey !== "deathmatch") {
-            await interaction.reply({ content: "Start Game is only for the public Deathmatch panel.", ephemeral: true });
+            await interaction.reply({ content: "Start Game is only for the public Deathmatch panel.", ephemeral: true }).catch(() => null);
             return;
           }
 
           if (state.startedAt) {
-            await interaction.reply({ content: "This game already started.", ephemeral: true });
+            await interaction.reply({ content: "This game already started.", ephemeral: true }).catch(() => null);
             return;
           }
 
           const gameId = String(state.settings.gameId ?? "").trim();
           if (!gameId) {
-            await interaction.reply({ content: "No gameId is set for this event yet.", ephemeral: true });
+            await interaction.reply({ content: "No gameId is set for this event yet.", ephemeral: true }).catch(() => null);
             return;
           }
 
-          await interaction.deferReply({ ephemeral: true });
+          await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
           const mod = await importDeathmatchModule();
           if (typeof mod?.startDeathmatchGame !== "function") {
-            await interaction.editReply({ content: "startDeathmatchGame() not found in deathmatch module." });
+            await interaction.editReply({ content: "startDeathmatchGame() not found in deathmatch module." }).catch(() => null);
             return;
           }
 
@@ -2409,7 +2392,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
               no_game: "No active game found.",
               state_missing: "Game state missing.",
             };
-            await interaction.editReply({ content: reasonMap[startRes.reason] || "Could not start the game." });
+            await interaction.editReply({ content: reasonMap[startRes.reason] || "Could not start the game." }).catch(() => null);
             return;
           }
 
@@ -2431,17 +2414,17 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
           }
 
           await updatePanelMessage(client, state).catch(() => null);
-          await interaction.editReply({ content: "Deathmatch started. Countdown sent in-game." });
+          await interaction.editReply({ content: "Deathmatch started. Countdown sent in-game." }).catch(() => null);
           return;
         }
 
         if (state.panelType !== "staff") {
-          await interaction.reply({ content: "Use the staff setup panel to control this event.", ephemeral: true });
+          await interaction.reply({ content: "Use the staff setup panel to control this event.", ephemeral: true }).catch(() => null);
           return;
         }
 
         if (state.status !== "setup") {
-          await interaction.reply({ content: "This setup panel is already locked.", ephemeral: true });
+          await interaction.reply({ content: "This setup panel is already locked.", ephemeral: true }).catch(() => null);
           return;
         }
 
@@ -2449,7 +2432,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
         if (customId.startsWith("evp:pick:")) {
           const key = customId.split(":")[2];
           if (!EVENT_KEYS.includes(key)) {
-            await interaction.reply({ content: "Unknown event type.", ephemeral: true });
+            await interaction.reply({ content: "Unknown event type.", ephemeral: true }).catch(() => null);
             return;
           }
 
@@ -2471,10 +2454,10 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
         // EDIT
         if (customId === "evp:edit") {
           if (!state.selectedEventKey) {
-            await interaction.reply({ content: "Pick an event first.", ephemeral: true });
+            await interaction.reply({ content: "Pick an event first.", ephemeral: true }).catch(() => null);
             return;
           }
-          await interaction.showModal(buildEditModal(state));
+          await interaction.showModal(buildEditModal(state)).catch(() => null);
           return;
         }
 
@@ -2507,9 +2490,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
               state.settings.gameId = String(created.gameId ?? "").trim();
               state.settings.gameLink = String(created.gameLink ?? "").trim();
             } catch (e) {
-              await interaction
-                .followUp({ content: `Auto-create failed: ${String(e?.message ?? e)}`, ephemeral: true })
-                .catch(() => null);
+              await interaction.followUp({ content: `Auto-create failed: ${String(e?.message ?? e)}`, ephemeral: true }).catch(() => null);
               return;
             }
           }
@@ -2573,7 +2554,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
           return;
         }
 
-        await interaction.reply({ content: "Unknown panel action.", ephemeral: true });
+        await interaction.reply({ content: "Unknown panel action.", ephemeral: true }).catch(() => null);
         return;
       }
 
@@ -2585,7 +2566,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
 
         // CONTROL PANEL MODALS
         if (customId?.startsWith("evc:modal:")) {
-          if (!interaction.inGuild?.() || !isStaff(interaction.member)) {
+          if (!interaction.inGuild?.() || !canUseControlPanel(interaction.member)) {
             await interaction.reply({ content: "Staff-only controls.", ephemeral: true }).catch(() => null);
             return;
           }
@@ -2672,17 +2653,17 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
         const state = await getStateByMessageId(msgId);
 
         if (!state) {
-          await interaction.reply({ content: "Panel state missing. Repost with -eventpanel.", ephemeral: true });
+          await interaction.reply({ content: "Panel state missing. Repost with -eventpanel.", ephemeral: true }).catch(() => null);
           return;
         }
 
-        if (!interaction.inGuild?.() || !isStaff(interaction.member)) {
-          await interaction.reply({ content: "Staff-only modal.", ephemeral: true });
+        if (!interaction.inGuild?.() || !canUseEventPanel(interaction.member)) {
+          await interaction.reply({ content: "Staff-only modal.", ephemeral: true }).catch(() => null);
           return;
         }
 
         if (state.panelType !== "staff" || state.status !== "setup") {
-          await interaction.reply({ content: "This panel can’t be edited right now.", ephemeral: true });
+          await interaction.reply({ content: "This panel can’t be edited right now.", ephemeral: true }).catch(() => null);
           return;
         }
 
@@ -2693,7 +2674,7 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
         const rulesOverride = String(interaction.fields.getTextInputValue("rulesOverride") ?? "").trim();
 
         if (!isValidHttpUrlMaybeEmpty(gameLink)) {
-          await interaction.reply({ content: "Game link must be a valid http(s) URL (or leave it blank).", ephemeral: true });
+          await interaction.reply({ content: "Game link must be a valid http(s) URL (or leave it blank).", ephemeral: true }).catch(() => null);
           return;
         }
 
@@ -2716,8 +2697,8 @@ export function registerEventPanel(client, { prefix = "-" } = {}) {
 
         await saveState(state);
 
-        await interaction.reply({ content: "Updated.", ephemeral: true });
-        await updatePanelMessage(client, state);
+        await interaction.reply({ content: "Updated.", ephemeral: true }).catch(() => null);
+        await updatePanelMessage(client, state).catch(() => null);
       }
     } catch (e) {
       console.error("[miniEvents] InteractionCreate error:", e);

@@ -244,6 +244,9 @@ export function canRunStaffCommand(member, commandName) {
   // admin bypass so you can't lock yourself out
   if (isAdmin(member)) return true;
 
+  // parent permission
+  if (canAccessAdminPanel(member)) return true;
+  
   // NEW: user allowlist
   const users = getUsersForCommand(member.guild.id, commandName);
   if (users.length && users.includes(String(member.id))) return true;
