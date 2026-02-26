@@ -1,8 +1,9 @@
 /** @format */
 // staffcommands/panelSettings.js
 
-import { ChannelType, EmbedBuilder, Events, PermissionsBitField } from "discord.js";
+import { ChannelType, EmbedBuilder, Events } from "discord.js";
 import { query } from "../src/db.js";
+import { requireStaffCommand } from "./botcommands.js";
 
 const PANELS = {
   // where staff runs the setup panel (the interactive picker)
@@ -14,16 +15,6 @@ const PANELS = {
   // optional, if you still want it
   adminpanel: { label: "Admin Panel", command: "adminpanel" },
 };
-
-function isStaff(member) {
-  const perms = member?.permissions;
-  if (!perms) return false;
-  return (
-    perms.has(PermissionsBitField.Flags.Administrator) ||
-    perms.has(PermissionsBitField.Flags.ManageGuild) ||
-    perms.has(PermissionsBitField.Flags.ManageChannels)
-  );
-}
 
 async function getGuildCfg(guildId) {
   const gid = String(guildId);
@@ -138,10 +129,9 @@ function registerPanelSettingsImpl(client, { prefix = "-" } = {}) {
 
       if (cmd !== "panelsettings" && cmd !== "setpanel" && cmd !== "clearpanel") return;
 
-      if (!isStaff(message.member)) {
-        await message.reply("Staff only.").catch(() => null);
-        return;
-      }
+      // ✅ Central gate: adminpanel access (parent) should pass this automatically
+      const ok = await requireStaffCommand(message, prefix, cmd);
+      if (!ok) return;
 
       // -panelsettings
       if (cmd === "panelsettings") {
