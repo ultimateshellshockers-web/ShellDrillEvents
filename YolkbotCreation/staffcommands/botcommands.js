@@ -13,6 +13,10 @@
 // - requireStaffCommand(message, prefix, commandName)
 //
 // Stores config in: staffAccess.json (project root)
+//
+// UPDATE:
+// - Staff access is USER-based (not role-based)
+// - BOT_OWNER_IDS env var bypass so the bot owner can always use adminpanel/staff commands
 
 import fs from "node:fs";
 import path from "node:path";
@@ -24,11 +28,26 @@ import {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
-  RoleSelectMenuBuilder,
   UserSelectMenuBuilder,
 } from "discord.js";
 
 console.log("[staff] botcommands.js loaded");
+
+// --------------------
+// helpers
+// --------------------
+const s = (x) => String(x ?? "").trim();
+
+const OWNER_IDS = new Set(
+  s(process.env.BOT_OWNER_IDS)
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+);
+
+function isOwnerId(userId) {
+  return OWNER_IDS.has(s(userId));
+}
 
 // --------------------
 // config store
@@ -51,47 +70,74 @@ function saveCfg(cfg) {
 const cfg = loadCfg();
 
 function getGuildCfg(guildId) {
-  const gid = String(guildId);
-  if (!cfg[gid]) cfg[gid] = { commands: {}, panelAccess: { usersAllow: [] } };
+  const gid = s(guildId);
+  if (!cfg[gid]) cfg[gid] = { users: {}, panelAccess: { usersAllow: [] }, legacyRoles: {} };
 
-  if (!cfg[gid].commands || typeof cfg[gid].commands !== "object") cfg[gid].commands = {};
+  // users per command (NEW)
+  if (!cfg[gid].users || typeof cfg[gid].users !== "object") cfg[gid].users = {};
 
+  // legacy role-based store (OLD) kept to avoid hard breaking older configs
+  // (not shown in UI anymore, but still honored)
+  if (!cfg[gid].legacyRoles || typeof cfg[gid].legacyRoles !== "object") cfg[gid].legacyRoles = {};
+
+  // panel access allowlist
   if (!cfg[gid].panelAccess || typeof cfg[gid].panelAccess !== "object") {
     cfg[gid].panelAccess = { usersAllow: [] };
   }
   if (!Array.isArray(cfg[gid].panelAccess.usersAllow)) cfg[gid].panelAccess.usersAllow = [];
 
+  // migrate old structure if it exists (old file used cfg[gid].commands for roles)
+  if (cfg[gid].commands && typeof cfg[gid].commands === "object") {
+    cfg[gid].legacyRoles = cfg[gid].legacyRoles || {};
+    for (const [k, v] of Object.entries(cfg[gid].commands)) {
+      if (Array.isArray(v) && !Array.isArray(cfg[gid].legacyRoles[k])) {
+        cfg[gid].legacyRoles[k] = v.map(String);
+      }
+    }
+    delete cfg[gid].commands;
+    saveCfg(cfg);
+  }
+
   return cfg[gid];
 }
 
 // --------------------
-// staff command role access (per command)
+// staff command USER access (per command)
 // --------------------
-function getRolesForCommand(guildId, commandName) {
+function getUsersForCommand(guildId, commandName) {
   const g = getGuildCfg(guildId);
-  const key = String(commandName).toLowerCase();
-  const arr = g.commands[key];
-  return Array.isArray(arr) ? arr : [];
+  const key = s(commandName).toLowerCase();
+  const arr = g.users[key];
+  return Array.isArray(arr) ? arr.map(String) : [];
 }
 
-function setRolesForCommand(guildId, commandName, roleIds) {
+function setUsersForCommand(guildId, commandName, userIds) {
   const g = getGuildCfg(guildId);
-  const key = String(commandName).toLowerCase();
-  g.commands[key] = Array.from(new Set(roleIds.map(String)));
+  const key = s(commandName).toLowerCase();
+  g.users[key] = Array.from(new Set(userIds.map(String)));
   saveCfg(cfg);
 }
 
-function addRoleToCommand(guildId, commandName, roleId) {
-  const roles = getRolesForCommand(guildId, commandName);
-  const rid = String(roleId);
-  if (!roles.includes(rid)) roles.push(rid);
-  setRolesForCommand(guildId, commandName, roles);
+function addUsersToCommand(guildId, commandName, userIds) {
+  const current = new Set(getUsersForCommand(guildId, commandName).map(String));
+  for (const id of userIds.map(String)) current.add(id);
+  setUsersForCommand(guildId, commandName, Array.from(current));
 }
 
-function removeRoleFromCommand(guildId, commandName, roleId) {
-  const rid = String(roleId);
-  const roles = getRolesForCommand(guildId, commandName).filter((id) => id !== rid);
-  setRolesForCommand(guildId, commandName, roles);
+function removeUsersFromCommand(guildId, commandName, userIds) {
+  const remove = new Set(userIds.map(String));
+  const next = getUsersForCommand(guildId, commandName).filter((id) => !remove.has(String(id)));
+  setUsersForCommand(guildId, commandName, next);
+}
+
+// --------------------
+// legacy ROLE access (still honored, no UI)
+// --------------------
+function getLegacyRolesForCommand(guildId, commandName) {
+  const g = getGuildCfg(guildId);
+  const key = s(commandName).toLowerCase();
+  const arr = g.legacyRoles?.[key];
+  return Array.isArray(arr) ? arr.map(String) : [];
 }
 
 // --------------------
@@ -99,7 +145,7 @@ function removeRoleFromCommand(guildId, commandName, roleId) {
 // --------------------
 function getPanelAllowUsers(guildId) {
   const g = getGuildCfg(guildId);
-  return Array.isArray(g.panelAccess.usersAllow) ? g.panelAccess.usersAllow : [];
+  return Array.isArray(g.panelAccess.usersAllow) ? g.panelAccess.usersAllow.map(String) : [];
 }
 
 function addPanelAllowUsers(guildId, userIds) {
@@ -113,7 +159,7 @@ function addPanelAllowUsers(guildId, userIds) {
 function removePanelAllowUsers(guildId, userIds) {
   const g = getGuildCfg(guildId);
   const remove = new Set(userIds.map(String));
-  g.panelAccess.usersAllow = getPanelAllowUsers(guildId).map(String).filter((id) => !remove.has(id));
+  g.panelAccess.usersAllow = getPanelAllowUsers(guildId).filter((id) => !remove.has(String(id)));
   saveCfg(cfg);
 }
 
@@ -145,7 +191,13 @@ function isAdmin(member) {
 
 function canAccessAdminPanel(member) {
   if (!member?.guild) return false;
-  if (isAdmin(member)) return true; // hard bypass so admins can't lock themselves out
+
+  // bot owner always allowed
+  if (isOwnerId(member.id)) return true;
+
+  // admins/managers always allowed so they can't lock themselves out
+  if (isAdmin(member)) return true;
+
   const allowed = getPanelAllowUsers(member.guild.id);
   return allowed.includes(String(member.id));
 }
@@ -155,15 +207,15 @@ function canAccessAdminPanel(member) {
 // (supports @Bot -cmd as well as -cmd)
 // --------------------
 function stripLeadingBotMention(text, botId) {
-  let s = String(text ?? "").trimStart();
-  if (!botId) return s;
+  let t = String(text ?? "").trimStart();
+  if (!botId) return t;
 
   const m1 = `<@${botId}>`;
   const m2 = `<@!${botId}>`;
 
-  if (s.startsWith(m1)) return s.slice(m1.length).trimStart();
-  if (s.startsWith(m2)) return s.slice(m2.length).trimStart();
-  return s;
+  if (t.startsWith(m1)) return t.slice(m1.length).trimStart();
+  if (t.startsWith(m2)) return t.slice(m2.length).trimStart();
+  return t;
 }
 
 function parsePrefixed(message, prefix, botId) {
@@ -185,20 +237,30 @@ function parsePrefixed(message, prefix, botId) {
 // --------------------
 export function canRunStaffCommand(member, commandName) {
   if (!member || !member.guild) return false;
-  if (isAdmin(member)) return true; // admin bypass so you can't lock yourself out
 
-  const roles = getRolesForCommand(member.guild.id, commandName);
-  if (!roles.length) return false;
+  // bot owner bypass
+  if (isOwnerId(member.id)) return true;
 
-  return member.roles.cache.some((r) => roles.includes(r.id));
+  // admin bypass so you can't lock yourself out
+  if (isAdmin(member)) return true;
+
+  // NEW: user allowlist
+  const users = getUsersForCommand(member.guild.id, commandName);
+  if (users.length && users.includes(String(member.id))) return true;
+
+  // legacy: role allowlist (if you had older config)
+  const roles = getLegacyRolesForCommand(member.guild.id, commandName);
+  if (roles.length && member.roles?.cache?.some((r) => roles.includes(r.id))) return true;
+
+  return false;
 }
 
 export async function requireStaffCommand(message, prefix, commandName) {
   const member = message.member;
   if (canRunStaffCommand(member, commandName)) return true;
 
-  const roles = getRolesForCommand(message.guild.id, commandName);
-  const roleText = roles.length ? roles.map((id) => `<@&${id}>`).join(" ") : "_None configured_";
+  const users = getUsersForCommand(message.guild.id, commandName);
+  const userText = users.length ? users.map((id) => `<@${id}>`).join(", ") : "_None configured_";
 
   await message
     .reply({
@@ -208,7 +270,7 @@ export async function requireStaffCommand(message, prefix, commandName) {
           color: COLORS.err,
           description:
             `You can't use \`${prefix}${commandName}\`.\n\n` +
-            `**Allowed roles:** ${roleText}\n` +
+            `**Allowed users:** ${userText}\n` +
             `**Everyone else:** denied`,
         }),
       ],
@@ -225,7 +287,15 @@ const panelState = new Map(); // messageId -> { ownerId, guildId, section, selec
 
 function formatAllowedUsers(guildId) {
   const ids = getPanelAllowUsers(guildId);
-  if (!ids.length) return "_None (Admins only)_";
+  if (!ids.length) return "_None (Admins/Owners only)_";
+
+  const slice = ids.slice(0, 30).map((id) => `<@${id}>`).join(", ");
+  return ids.length > 30 ? `${slice}\n…and ${ids.length - 30} more.` : slice;
+}
+
+function formatAllowedUsersForCommand(guildId, cmd) {
+  const ids = getUsersForCommand(guildId, cmd);
+  if (!ids.length) return "_None (Admins/Owners only)_";
 
   const slice = ids.slice(0, 30).map((id) => `<@${id}>`).join(", ");
   return ids.length > 30 ? `${slice}\n…and ${ids.length - 30} more.` : slice;
@@ -233,11 +303,11 @@ function formatAllowedUsers(guildId) {
 
 function renderStaffEmbed(guildId, commands, selectedCommand) {
   const fields = commands.map((cmd) => {
-    const roles = getRolesForCommand(guildId, cmd);
-    const roleText = roles.length ? roles.map((id) => `<@&${id}>`).join(" ") : "_None (Admins only)_";
+    const userText = formatAllowedUsersForCommand(guildId, cmd);
+
     return {
       name: cmd,
-      value: `**Allowed:** ${roleText}\n**Everyone else:** denied`,
+      value: `**Allowed users:** ${userText}\n**Everyone else:** denied`,
       inline: false,
     };
   });
@@ -246,8 +316,8 @@ function renderStaffEmbed(guildId, commands, selectedCommand) {
     title: "Admin Panel | Staff Command Access",
     color: COLORS.info,
     description:
-      "Configure which roles can run staff commands.\n" +
-      "Pick a command, then add/remove roles.\n\n" +
+      "Configure which *users* can run staff commands.\n" +
+      "Pick a command, then add/remove users.\n\n" +
       `**Selected:** \`${selectedCommand}\``,
     fields,
     footer: "Stop Configuration to finalize changes",
@@ -260,7 +330,7 @@ function renderPanelAccessEmbed(guildId) {
     color: COLORS.info,
     description:
       "Grant/revoke which *users* can open this admin panel.\n" +
-      "Admins/Manage Server always have access.\n\n" +
+      "Admins/Manage Server and Bot Owners always have access.\n\n" +
       "**Allowed users:**\n" +
       formatAllowedUsers(guildId),
     footer: "Stop Configuration to finalize changes",
@@ -296,8 +366,8 @@ function buildCommandRow(ownerId, commands, selectedCommand) {
 
 function buildStaffButtonsRow(ownerId) {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`ap:add:${ownerId}`).setLabel("Add Staff Role").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`ap:remove:${ownerId}`).setLabel("Remove Staff Role").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`ap:add:${ownerId}`).setLabel("Add Staff User").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`ap:remove:${ownerId}`).setLabel("Remove Staff User").setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId(`ap:stop:${ownerId}`).setLabel("Stop Configuration").setStyle(ButtonStyle.Secondary)
   );
 }
@@ -308,14 +378,14 @@ function buildPanelButtonsRow(ownerId) {
   );
 }
 
-function buildRolePickerRow(ownerId, mode /* add|remove */, selectedCommand) {
-  const rolePicker = new RoleSelectMenuBuilder()
-    .setCustomId(`ap:role:${mode}:${selectedCommand}:${ownerId}`)
-    .setPlaceholder(mode === "add" ? "Pick a role to ADD" : "Pick a role to REMOVE")
+function buildStaffUserPickerRow(ownerId, mode /* add|remove */, selectedCommand) {
+  const picker = new UserSelectMenuBuilder()
+    .setCustomId(`ap:staffuser:${mode}:${selectedCommand}:${ownerId}`)
+    .setPlaceholder(mode === "add" ? "Search/select user(s) to ADD" : "Search/select user(s) to REMOVE")
     .setMinValues(1)
-    .setMaxValues(1);
+    .setMaxValues(5);
 
-  return new ActionRowBuilder().addComponents(rolePicker);
+  return new ActionRowBuilder().addComponents(picker);
 }
 
 function buildPanelUserPickerRows(ownerId) {
@@ -384,7 +454,7 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
               color: COLORS.err,
               description:
                 "You don't have access to the admin panel.\n\n" +
-                "**Allowed:** Admins / Manage Server, or users explicitly granted access.",
+                "**Allowed:** Admins / Manage Server, Bot Owners, or users explicitly granted access.",
             }),
           ],
         });
@@ -444,7 +514,7 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
         return;
       }
 
-      // PUBLIC denial for anyone without panel access (your request, even though it's noisy)
+      // PUBLIC denial for anyone without panel access
       const member = interaction.member;
       if (!canAccessAdminPanel(member)) {
         await interaction.reply({
@@ -460,7 +530,7 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
         return;
       }
 
-      // Keep owner-only editing so random allowed users can't hijack someone else's panel message
+      // Keep owner-only editing so other allowed users can't hijack someone else's panel message
       if (!isPanelOwner(interaction, state.ownerId)) {
         await interaction.reply({
           embeds: [
@@ -475,6 +545,9 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
         return;
       }
 
+      const isOwner = isOwnerId(interaction.user?.id);
+      const isMgr = isAdmin(member);
+
       // ---- section dropdown ----
       if (interaction.isStringSelectMenu() && cid === `ap:section:${state.ownerId}`) {
         const picked = interaction.values?.[0];
@@ -482,7 +555,6 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
 
         state.section = picked === "panel" ? "panel" : "staff";
 
-        // Ensure we have a command selected when switching back
         if (state.section === "staff" && !state.selectedCommand) {
           state.selectedCommand = state.commands?.[0] ?? "questpanel";
         }
@@ -490,7 +562,11 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
         panelState.set(msgId, state);
 
         await interaction.update({
-          embeds: [state.section === "panel" ? renderPanelAccessEmbed(state.guildId) : renderStaffEmbed(state.guildId, state.commands, state.selectedCommand)],
+          embeds: [
+            state.section === "panel"
+              ? renderPanelAccessEmbed(state.guildId)
+              : renderStaffEmbed(state.guildId, state.commands, state.selectedCommand),
+          ],
           components: buildPanelView(state),
         });
         return;
@@ -513,21 +589,75 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
         return;
       }
 
-      // ---- panel access user pickers (admins only) ----
+      // ---- user select menus ----
       if (interaction.isUserSelectMenu()) {
+        // staff users picker
+        if (cid.startsWith("ap:staffuser:")) {
+          if (state.section !== "staff") return;
+
+          // Only Admins/Manage Server OR bot owner can change staff access
+          if (!isMgr && !isOwner) {
+            await interaction.reply({
+              embeds: [
+                makeEmbed({
+                  title: "Permission denied",
+                  color: COLORS.err,
+                  description: "Only Admins / Manage Server or Bot Owners can modify staff access.",
+                }),
+              ],
+              ephemeral: false,
+            });
+            return;
+          }
+
+          const parts = cid.split(":"); // ap:staffuser:<add|remove>:<command>:<ownerId>
+          const mode = parts[2];
+          const cmd = parts[3];
+          const ownerId = parts[4];
+          if (ownerId !== state.ownerId) return;
+
+          const picked = interaction.values ?? [];
+          if (!picked.length) return;
+
+          if (mode === "add") addUsersToCommand(state.guildId, cmd, picked);
+          else removeUsersFromCommand(state.guildId, cmd, picked);
+
+          await interaction.reply({
+            embeds: [
+              makeEmbed({
+                title: mode === "add" ? "Users added" : "Users removed",
+                color: COLORS.ok,
+                description:
+                  (mode === "add" ? "Granted" : "Revoked") +
+                  ` access for \`${state.prefix}${cmd}\`:\n` +
+                  picked.map((id) => `• <@${id}>`).join("\n"),
+              }),
+            ],
+            ephemeral: true,
+          });
+
+          await interaction.message.edit({
+            embeds: [renderStaffEmbed(state.guildId, state.commands, state.selectedCommand)],
+            components: buildPanelView(state),
+          });
+
+          return;
+        }
+
+        // panel access user pickers
         if (state.section !== "panel") return;
 
-        // Only admins can grant/revoke panel access
-        if (!isAdmin(member)) {
+        // Only Admins OR bot owner can modify panel access
+        if (!isMgr && !isOwner) {
           await interaction.reply({
             embeds: [
               makeEmbed({
                 title: "Permission denied",
                 color: COLORS.err,
-                description: "Only Admins / Manage Server can modify panel access.",
+                description: "Only Admins / Manage Server or Bot Owners can modify panel access.",
               }),
             ],
-            ephemeral: false, // public, since you asked for public denial
+            ephemeral: false,
           });
           return;
         }
@@ -564,9 +694,24 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
         if (cid === `ap:add:${state.ownerId}`) {
           if (state.section !== "staff") return;
 
+          // Only Admins OR bot owner can change staff access
+          if (!isAdmin(member) && !isOwnerId(interaction.user?.id)) {
+            await interaction.reply({
+              embeds: [
+                makeEmbed({
+                  title: "Permission denied",
+                  color: COLORS.err,
+                  description: "Only Admins / Manage Server or Bot Owners can modify staff access.",
+                }),
+              ],
+              ephemeral: true,
+            });
+            return;
+          }
+
           await interaction.update({
             embeds: [renderStaffEmbed(state.guildId, state.commands, state.selectedCommand)],
-            components: buildPanelView(state, buildRolePickerRow(state.ownerId, "add", state.selectedCommand)),
+            components: buildPanelView(state, buildStaffUserPickerRow(state.ownerId, "add", state.selectedCommand)),
           });
           return;
         }
@@ -574,9 +719,24 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
         if (cid === `ap:remove:${state.ownerId}`) {
           if (state.section !== "staff") return;
 
+          // Only Admins OR bot owner can change staff access
+          if (!isAdmin(member) && !isOwnerId(interaction.user?.id)) {
+            await interaction.reply({
+              embeds: [
+                makeEmbed({
+                  title: "Permission denied",
+                  color: COLORS.err,
+                  description: "Only Admins / Manage Server or Bot Owners can modify staff access.",
+                }),
+              ],
+              ephemeral: true,
+            });
+            return;
+          }
+
           await interaction.update({
             embeds: [renderStaffEmbed(state.guildId, state.commands, state.selectedCommand)],
-            components: buildPanelView(state, buildRolePickerRow(state.ownerId, "remove", state.selectedCommand)),
+            components: buildPanelView(state, buildStaffUserPickerRow(state.ownerId, "remove", state.selectedCommand)),
           });
           return;
         }
@@ -595,65 +755,9 @@ export function registerAdminPanel(client, { prefix = "-", commands = ["questpan
 
           panelState.delete(msgId);
 
-          // If you REALLY want it to disappear, try deleting it (may fail due to perms)
           await interaction.message.delete().catch(() => {});
           return;
         }
-      }
-
-      // ---- role select ----
-      if (interaction.isRoleSelectMenu()) {
-        if (state.section !== "staff") return;
-
-        // ap:role:<add|remove>:<command>:<ownerId>
-        const parts = cid.split(":");
-        const mode = parts[2];
-        const cmd = parts[3];
-        const ownerId = parts[4];
-
-        if (ownerId !== state.ownerId) return;
-
-        const roleId = interaction.values?.[0];
-        if (!roleId) return;
-
-        if (mode === "add") {
-          addRoleToCommand(state.guildId, cmd, roleId);
-          await interaction.reply({
-            embeds: [
-              makeEmbed({
-                title: "Role added",
-                color: COLORS.ok,
-                description: `Added <@&${roleId}> to \`${state.prefix}${cmd}\` access.`,
-              }),
-            ],
-            ephemeral: true,
-          });
-        } else {
-          const before = getRolesForCommand(state.guildId, cmd);
-          removeRoleFromCommand(state.guildId, cmd, roleId);
-
-          const removed = before.includes(roleId);
-          await interaction.reply({
-            embeds: [
-              makeEmbed({
-                title: removed ? "Role removed" : "Nothing to remove",
-                color: removed ? COLORS.ok : COLORS.warn,
-                description: removed
-                  ? `Removed <@&${roleId}> from \`${state.prefix}${cmd}\` access.`
-                  : `<@&${roleId}> was not configured for \`${state.prefix}${cmd}\`.`,
-              }),
-            ],
-            ephemeral: true,
-          });
-        }
-
-        // Refresh panel (hide picker row)
-        await interaction.message.edit({
-          embeds: [renderStaffEmbed(state.guildId, state.commands, state.selectedCommand)],
-          components: buildPanelView(state),
-        });
-
-        return;
       }
     } catch (e) {
       console.error("[adminpanel] InteractionCreate error:", e);
